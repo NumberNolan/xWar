@@ -25,7 +25,7 @@ against actual WAR — see [Calibration](#calibration-of-woba_scale-and-runs_per
  
 ```
 .
-├── xWAR_model_v4_calibrated.ipynb   # full pipeline: clean → model → calibrate → validate → export
+├── xWAR_model.ipynb   # full pipeline: clean → model → calibrate → validate → export
 ├── expectedwar.csv                  # input dataset
 └── xwar_all_player_seasons.csv   # output: xWAR for every player-season, all three models
 ```
