@@ -1,112 +1,107 @@
-# xWAR — Expected WAR for Position Players (2021–2025)
- 
-An Expected WAR (xWAR) metric for MLB position players, built from a merged 2021–2025 Statcast
-dataset. xWAR re-derives WAR from the underlying batted-ball, baserunning, and fielding inputs that
-*produce* performance, rather than performance itself — the idea being to estimate what a player's
-WAR "should" look like given their skill profile.
- 
-## What this is
- 
-xWAR is built from four components, mirroring how public WAR is constructed:
- 
-| Component | Inputs | Notes |
-|---|---|---|
-| **Hitting** | BB%, K%, Barrel% + batted-ball profile (EV, HardHit%, EV90, MaxEV, LA, LD%, GB%, FB%, Pull%) | Predicts xwOBA, converted to batting runs above league average |
-| **Baserunning** | Sprint Speed, xwOBA, SB/CS/SB% | Predicts BsR; including real stolen-base attempts (not just raw speed) substantially improved fit over speed alone |
-| **Fielding** | FRM (catchers, already in runs) / OAA → runs (everyone else) | OAA converted using Statcast's published conversion: 0.90 runs/out (OF), 0.75 runs/out (IF) |
-| **Positional adjustment + replacement level** | Standard runs-per-600-PA tables, scaled by playing time | Anchors the metric to replacement level, not league average |
- 
-Runs above replacement (RAR) is converted to wins using `RUNS_PER_WIN`, and batting runs use
-`WOBA_SCALE` to convert wOBA points to runs. Rather than hardcoding the standard FanGraphs Guts
-constants, **both constants are calibrated empirically** by solving for the values that minimize error
-against actual WAR — see [Calibration](#calibration-of-woba_scale-and-runs_per_win) below.
- 
-## Repo structure
- 
-```
-.
-├── xWAR_model.ipynb   # full pipeline: clean → model → calibrate → validate → export
-├── expectedwar.csv                  # input dataset
-└── xwar_all_player_seasons.csv   # output: xWAR for every player-season, all three models
-```
- 
-## Data
- 
-The notebook expects a CSV (`expectedwar.csv`) with one row per player-season-position, merged from
-Statcast and FanGraphs leaderboard exports (2021–2025). Expected columns include percent-formatted
-rate stats (`bb`, `k`, `barrel`, `hardhit`, etc.), batted-ball profile fields (`ev`, `maxev`, `la`,
-`ld`, `gb`, `fb`, `pull`), baserunning fields (`sprint_speed`, `sb`, `cs`, `sb%`), fielding (`oaa`,
-`frm`), and the target columns (`woba`, `bsr`, `war`).
- 
-## Models
- 
-Three models are fit and compared for both the hitting and baserunning components:
- 
-- **Linear Regression**
-- **Random Forest**
-- **XGBoost**
-Each is evaluated on an identical held-out test split (80/20, fixed random seed), so the comparison
-table at the end of the notebook is apples-to-apples across all three.
- 
-### Model selection: Linear Regression
- 
-**Linear Regression is the model used for the final xWAR metric.** Across testing, it produced the
-best (or statistically tied for best) held-out R² on both the hitting and baserunning components — the
-more flexible tree-based models (Random Forest, XGBoost) did not produce a meaningful improvement
-despite their added complexity. Given that Linear Regression matches or beats the alternatives on
-accuracy, it's the clear choice on simplicity grounds too:
- 
-- **Fully interpretable** — each coefficient reads directly as "runs (or wOBA points) of value per
-  unit of the underlying stat," which is useful both for sanity-checking the model and for explaining
-  *why* a player's xWAR is what it is.
-- **No hyperparameter tuning** — Random Forest and XGBoost both require tuning (tree depth, learning
-  rate, number of estimators, subsampling) to avoid overfitting on a dataset of this size; Linear
-  Regression has no such surface to tune or get wrong.
-- **More stable across re-runs and seasons** — tree ensembles are more prone to fold-to-fold variance
-  on a relatively small number of features and player-seasons; the linear fit is far less sensitive to
-  the train/test split.
-- **Easier to maintain and extend** — adding a new feature, refitting on an updated season, or
-  recalibrating constants is just re-running a closed-form fit, not re-tuning a model.
-In short: when the simpler model isn't meaningfully worse on the metric that matters, the added
-complexity of Random Forest/XGBoost isn't earning its keep. The notebook keeps all three models in
-place for transparency and so the comparison can be re-checked as the dataset grows — but Linear
-Regression is the one whose output (`xWAR_lin`) should be treated as the headline metric.
+# xWAR: Expected Wins Above Replacement
 
- 
-## Calibration of `WOBA_SCALE` and `RUNS_PER_WIN`
- 
-Rather than using the standard FanGraphs Guts placeholder constants, the notebook solves for the
-`WOBA_SCALE` and `RUNS_PER_WIN` values that minimize squared error against actual WAR. This works
-because, once xwOBA and xBsR are already predicted, the rest of the pipeline is linear in exactly two
-unknowns:
- 
+A from-scratch WAR estimation framework built on Statcast/FanGraphs data (2021–2025), covering both **position players** and **pitchers**. The goal is to estimate a player's WAR from underlying skill indicators (batted-ball quality, plate discipline, sprint speed, etc.) rather than from realized outcomes — separating true talent from luck/sequencing noise.
+
+Both pipelines use **linear regression** as the final model. Random forest and XGBoost were evaluated as alternatives and underperformed linear regression on held-out R², so linear regression was kept as the production model for both position players and pitchers.
+
+## Repo contents
+
+| File | Description |
+|---|---|
+| `xWAR_hitters.ipynb` | Trains and validates the position-player pipeline on 2021–2025 data. Exports `xwar_hitters.csv`. |
+| `xWAR_pitchers.ipynb` | Trains and validates the pitcher pipeline on 2021–2025 data. Exports `xwar_pitchers.csv`. |
+| `xWAR_test_new_data.ipynb` | Scores any new hitter or pitcher dataset against the finalized linear models — pure inference, no fitting on the new data. |
+| `xwar_hitters.csv` | Output of `xWAR_hitters.ipynb` — one row per player-season (2021–2025), with `xWAR_lin`, `xWAR_rf`, `xWAR_xgb`. |
+| `xwar_pitchers.csv` | Output of `xWAR_pitchers.ipynb` — one row per pitcher-season (2021–2025), with `xWAR_lin`, `xWAR_rf`, `xWAR_xgb`, plus `xra9` and `fip` for reference. |
+
+---
+
+## Position Players
+
+### Overview
+xWAR for hitters is built from four components, each modeled or calculated independently, then combined into a single runs-above-replacement figure and converted to wins:
+
 ```
-xWAR = c1 · raw_woba_diff_term + c2 · other_runs
-  c1 = 1 / (WOBA_SCALE · RUNS_PER_WIN)
-  c2 = 1 / RUNS_PER_WIN
+xWAR = (Batting Runs + Baserunning Runs + Fielding Runs + Positional Adjustment + Replacement Runs) / RUNS_PER_WIN
 ```
- 
-A no-intercept OLS fit on the training set recovers `c1`/`c2` exactly, which are then converted back
-into `WOBA_SCALE` and `RUNS_PER_WIN`. This is done **separately for each model's pipeline** (lin/rf/xgb
-each get their own constants), since each model's xwOBA/xBsR scale differs slightly.
- 
-## Running it
- 
-```bash
-pip install pandas numpy scikit-learn xgboost matplotlib
-jupyter notebook xWAR_model_v4_calibrated.ipynb
+
+### 1. Hitting model (xwOBA)
+A linear regression predicts **wOBA** from batted-ball and plate-discipline inputs:
+
+- `bb_pct`, `k_pct` — plate discipline
+- `barrel_pct`, `hardhit_pct`, `ev90` (90th percentile exit velo) — batted-ball quality
+- `la` (launch angle), `ld_pct`, `fb_pct` — batted-ball shape
+
+Expected stats (xwOBA, xBA, etc.) were deliberately **excluded** from the feature set to avoid circularity — the model predicts wOBA from the same underlying process that generates expected stats, rather than using expected stats as an input to predict themselves.
+
+`ev` (average exit velocity), `maxev` (max exit velocity), and `pull_pct` were tested and removed. A p-value/VIF review found `maxev` (p=0.297) and `pull_pct` (p=0.164) were not statistically significant predictors of wOBA, and `ev`/`maxev`/`ev90` had severe multicollinearity (VIF in the thousands) as three overlapping measurements of the same exit-velocity distribution. Dropping all three cost under 0.002 held-out R².
+
+### 2. Baserunning model (xBsR)
+A separate linear regression predicts **BsR** (baserunning runs) from:
+
+- `sprint_speed`
+- `xwoba` (output of the hitting model — baserunning value is partly a function of how often a player is on base)
+- `sb`, `cs` — stolen base activity
+
+`sb_pct` was tested and removed — it's a direct function of `sb` and `cs`, both already in the model as raw counts, and added no independent signal once they were included.
+
+### 3. Fielding runs
+Not modeled — calculated directly from measured defensive metrics:
+- **Catchers**: FRM (framing runs) used directly.
+- **All other positions**: OAA (Outs Above Average) converted to runs via a position-specific factor (infield ≈ 0.75 runs/OAA, outfield ≈ 0.90 runs/OAA).
+
+### 4. Positional adjustment & replacement level
+Standard sabermetric constants, pro-rated to playing time (PA / 600):
+- Positional adjustment ranges from +9.5 runs/600 PA (C) to -15 runs/600 PA (DH).
+- Replacement level is a flat +20 runs/600 PA added to every player, representing the gap between replacement-level and average performance.
+
+### 5. Calibration
+`WOBA_SCALE` (converts wOBA above league average into runs) and `RUNS_PER_WIN` (converts total runs above replacement into wins) are **not** assumed from published constants — they're empirically fit via a no-intercept linear regression of actual WAR against the raw wOBA-differential term and the other-runs total, using 2021–2025 data. This lets the model calibrate itself to the specific run-scoring environment of the training window rather than relying on external published constants.
+
+### Multi-position handling
+Players who logged time at multiple positions in a season are collapsed into a single row (grouped by player/season), with OAA summed across positions and other fields taken as the primary-position value, rather than treating each position as a separate row.
+
+### Model comparison
+Linear regression outperformed both Random Forest and XGBoost on held-out R² for the hitting model, and was selected as the final approach.
+
+---
+
+## Pitchers
+
+### Overview
+xWAR for pitchers uses an **xRA9 approach**: predict a runs-allowed rate from pitch-level skill indicators, scale by innings pitched, and compare to a replacement-level baseline.
+
 ```
-The notebook will export `xwar_all_player_seasons.csv` with xWAR from all three models for every player-season in the
-dataset, alongside the model comparison table and validation plots used to support the model choice
-above.
- 
-## Limitations / next steps
- 
-- The calibrated `WOBA_SCALE` / `RUNS_PER_WIN` reflect the constants that best map *this specific
-  model's* RAR onto actual WAR — not an independent re-derivation of the "true" FanGraphs constants.
-  Any systematic bias in the positional/fielding constants gets partially absorbed into
-  `RUNS_PER_WIN` rather than isolated.
-- Worth checking the two calibration features (`raw_woba_diff_term`, `other_runs`) for collinearity
-  before trusting the calibrated constants at face value.
-- `bolts`, `hp_to_1b`, and `competitive_runs` are loaded but unused in the final baserunning model —
-  they showed mixed/marginal value in testing once SB/CS/SB% were included, but are easy to re-test.
+xWAR = (RA9_replacement − xRA9) × (IP / 9) / RUNS_PER_WIN
+```
+
+### 1. xRA9 model
+A linear regression predicts **ERA** (used as the runs-allowed proxy) from six features:
+
+- `k_pct`, `bb_pct` — strikeout and walk rate
+- `hr_fb_pct` — home run per fly ball rate
+- `gb_pct`, `fb_pct` — batted-ball profile
+- `hardhit_pct` — contact quality allowed
+
+These are close analogues to FIP's own components (K, BB, HR, contact quality), which is intentional — the model is designed to isolate the parts of run prevention that are pitcher skill rather than defense, sequencing, or luck on balls in play. In validation, xRA9 correlates much more strongly with FIP than with ERA, confirming it's capturing the skill-based signal rather than the noisier, defense-dependent ERA outcome directly.
+
+A p-value/VIF review of these six features (matching the review done on the hitting model) found **no features worth removing** — every coefficient is significant at p < 0.001.
+
+### 2. Calibration
+`RA9_replacement` (the runs-per-9 threshold that defines replacement level) and `RUNS_PER_WIN` are empirically fit via a no-intercept linear regression of actual WAR against `(IP/9)` and `xRA` (xRA9 × IP/9), using 2021–2025 data — the same self-calibrating approach used on the hitter side, rather than relying on externally published constants.
+
+---
+
+## Testing on new data
+
+`xWAR_test_new_data.ipynb` is a standalone notebook for scoring any new hitter or pitcher dataset — a new season, a subset of players, etc. — against the finalized models, without editing the training notebooks. It re-trains fresh on the 2021–2025 data (identical feature sets and cleaning logic to `xWAR_hitters.ipynb` / `xWAR_pitchers.ipynb`) and then scores the new file via `.predict()` only; the new data never touches `.fit()`. Set the input/output file names in the config cell at the top and run all cells.
+
+---
+
+## Shared design principles
+
+- **No circularity**: expected/estimated stats are never used as inputs to predict themselves.
+- **Empirical calibration over published constants**: scale factors (`WOBA_SCALE`, `RUNS_PER_WIN`, `RA9_replacement`) are fit directly from 2021–2025 data rather than assumed from external sabermetric literature.
+- **Every feature earns its place**: both feature sets went through a p-value + VIF review; features that weren't statistically significant or were fully redundant with another feature were cut (`ev`, `maxev`, `pull_pct`, `sb_pct` on the hitting side), and features that passed the review were kept even when VIF was elevated for expected structural reasons (the pitcher batted-ball features).
+- **Linear regression chosen on merit, not convention**: both pipelines tested linear regression against Random Forest and XGBoost, and linear regression won on held-out R² in both cases.
+- **Held-out validation**: 2021–2025 data is used for training and in-sample validation of the calibration; new/future data is scored as a pure test set via the separate `xWAR_test_new_data.ipynb` notebook, never touching `.fit()`.
